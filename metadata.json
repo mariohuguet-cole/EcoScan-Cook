@@ -1,0 +1,6 @@
+{
+  "name": "Eco Scan & Cook",
+  "description": "Aplicación web y móvil responsiva de sugerencias de recetas e inteligencia artificial basada en los ingredientes de tu despensa.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
