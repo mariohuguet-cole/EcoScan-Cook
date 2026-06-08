@@ -40,6 +40,89 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { RECIPES as INITIAL_RECIPES, INGREDIENTS, CATEGORIES, Recipe, Ingredient, FAMOUS_CHEFS, Chef } from "../lib/recipeData";
+import { db, auth, googleProvider, signInWithPopup, signInAnonymously, signOut, handleFirestoreError, OperationType } from "../lib/firebase";
+import { onAuthStateChanged } from "firebase/auth";
+import { collection, doc, getDoc, setDoc, updateDoc, onSnapshot, query, orderBy, getDocs } from "firebase/firestore";
+
+// Helper to seed initial community posts if collection is empty
+async function seedCommunityPostsIfEmpty() {
+  try {
+    const postsRef = collection(db, "communityPosts");
+    const snap = await getDocs(postsRef);
+    if (snap.empty) {
+      const defaultPosts = [
+        {
+          id: "p_1",
+          uid: "system_carlos",
+          username: "Carlos_Madrid",
+          avatarEmoji: "🍕",
+          avatarBg: "bg-amber-500",
+          text: "¡He preparado la Tortilla de Patatas de Eco Scan & Cook y ha quedado espectacular y súper jugosa! Conseguí un 100% de coincidencia con mi despensa. 🍳✨ ¡Recomendadísima!",
+          likes: 12,
+          likedByUids: [],
+          date: "Hace 1 hora",
+          replies: [
+            { username: "SofiaVeg", text: "¡Qué buena pinta! Yo le añado un poco de calabacín y queda de locos." }
+          ],
+          createdAt: new Date(Date.now() - 3600 * 1000).toISOString()
+        },
+        {
+          id: "p_4",
+          uid: "system_cantabro",
+          username: "ChefCantabro",
+          avatarEmoji: "👨‍🍳",
+          avatarBg: "bg-blue-500",
+          text: "¡Gran invento las Croquetas de Jamón extra cremosas! Mi abuela solía decir que una buena croqueta requiere paciencia, y la guía de Eco Scan me ayudó a emulsionar la mantequilla y leche perfectamente sin un solo grumo. Crujientes por fuera y mágicas por dentro. 🤤🍽️",
+          likes: 31,
+          likedByUids: [],
+          date: "Hace 20 min",
+          photo: "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&q=80&w=600",
+          replies: [
+            { username: "SofiaVeg", text: "¡Increíble! A mí me encantan con un toque de nuez moscada." }
+          ],
+          createdAt: new Date(Date.now() - 1200 * 1000).toISOString()
+        },
+        {
+          id: "p_2",
+          uid: "system_laura",
+          username: "LauraGastro",
+          avatarEmoji: "👩‍🍳",
+          avatarBg: "bg-emerald-500",
+          text: "Probando el generador de recetas con IA de Gemini. Tenía solo tomates maduros, pan duro y ajo en mi despensa... ¡y me ha sugerido un Salmorejo con un paso a paso perfecto! ¡Una maravilla contra el desperdicio! 🍅🍞 Refrescante para este verano.",
+          likes: 24,
+          likedByUids: ["default_user"],
+          date: "Hace 4 horas",
+          photo: "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&q=80&w=600",
+          replies: [
+            { username: "MikiChef", text: "El salmorejo es sagrado, ¡un plato humilde y de primera!" }
+          ],
+          createdAt: new Date(Date.now() - 14400 * 1000).toISOString()
+        },
+        {
+          id: "p_5",
+          uid: "system_carmen",
+          username: "CarmenValenciana",
+          avatarEmoji: "🥘",
+          avatarBg: "bg-amber-500",
+          text: "La receta de Paella de Marisco es asombrosa. Conseguí sacarle un socarrat crujiente en mi vitrocerámica gracias al truco del fuego máximo al final. Mis hijos no dejaron ni un grano de arroz. ¡Todo un acierto de recetas tradicionales! 🦞❤️",
+          likes: 42,
+          likedByUids: [],
+          date: "Hace 2 horas",
+          replies: [
+            { username: "Carlos_Madrid", text: "¡La paella valenciana es todo un arte, felicidades!" }
+          ],
+          createdAt: new Date(Date.now() - 7200 * 1000).toISOString()
+        }
+      ];
+      for (const p of defaultPosts) {
+        await setDoc(doc(db, "communityPosts", p.id), p);
+      }
+    }
+  } catch (err) {
+    console.warn("Unable to seed default community posts (possibly Firestore rule initialization is pending):", err);
+  }
+}
+
 
 // Lista de Avatares predefinidos simpáticos para el perfil de chef
 const CHEF_AVATARS = [
@@ -572,11 +655,10 @@ export default function EcoScanPage() {
     reader.readAsDataURL(file);
   };
 
-  // Usuario (null al inicio, simulando no autenticado)
+  // Usuario (null al inicio, controlado por Firebase Auth)
   const [user, setUser] = useState<{ name: string; avatar: typeof CHEF_AVATARS[0]; isGuest: boolean } | null>(null);
   
   // Despensa de ingredientes (IDs chequeados)
-  // Iniciamos con patatas, huevos, cebolla, aceite y sal para que tengan una receta lista de inicio (Tortilla)
   const [pantry, setPantry] = useState<string[]>(["patatas", "huevos", "cebolla", "aceite", "sal"]);
   const [customIngredients, setCustomIngredients] = useState<Ingredient[]>([]);
   const [searchPantryText, setSearchPantryText] = useState("");
@@ -600,7 +682,7 @@ export default function EcoScanPage() {
   // Modo Cocina paso activo
   const [cookingStep, setCookingStep] = useState(0);
 
-  // Historial de recetas cocinadas
+  // Historial de recetas cocinadas (se sincronizará con Firestore para usuarios logueados)
   const [cookedHistory, setCookedHistory] = useState<
     { id: string; recipeId: string; name: string; date: string; imageUrl: string; rating: number; favorite: boolean }[]
   >([
@@ -624,120 +706,200 @@ export default function EcoScanPage() {
     }
   ]);
 
-  // Mensajes de la Comunidad (Reseñas y Consejos)
+  // Mensajes de la Comunidad (Sincronizado globalmente en tiempo real en Firestore)
   const [communityPosts, setCommunityPosts] = useState<
     {
       id: string;
+      uid?: string;
       username: string;
       avatarEmoji: string;
       avatarBg: string;
       text: string;
       likes: number;
       likedByMe: boolean;
+      likedByUids?: string[];
       date: string;
       photo?: string;
       replies: { username: string; text: string }[];
     }[]
-  >([
-    {
-      id: "p_1",
-      username: "Carlos_Madrid",
-      avatarEmoji: "🍕",
-      avatarBg: "bg-amber-500",
-      text: "¡He preparado la Tortilla de Patatas de Eco Scan & Cook y ha quedado espectacular y súper jugosa! Conseguí un 100% de coincidencia con mi despensa. 🍳✨ ¡Recomendadísima!",
-      likes: 12,
-      likedByMe: false,
-      date: "Hace 1 hora",
-      replies: [
-        { username: "SofiaVeg", text: "¡Qué buena pinta! Yo le añado un poco de calabacín y queda de locos." }
-      ]
-    },
-    {
-      id: "p_4",
-      username: "ChefCantabro",
-      avatarEmoji: "👨‍🍳",
-      avatarBg: "bg-blue-500",
-      text: "¡Gran invento las Croquetas de Jamón extra cremosas! Mi abuela solía decir que una buena croqueta requiere paciencia, y la guía de Eco Scan me ayudó a emulsionar la mantequilla y leche perfectamente sin un solo grumo. Crujientes por fuera y mágicas por dentro. 🤤🍽️",
-      likes: 31,
-      likedByMe: false,
-      date: "Hace 20 min",
-      photo: "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&q=80&w=600",
-      replies: [
-        { username: "SofiaVeg", text: "¡Increíble! A mí me encantan con un toque de nuez moscada." }
-      ]
-    },
-    {
-      id: "p_2",
-      username: "LauraGastro",
-      avatarEmoji: "👩‍🍳",
-      avatarBg: "bg-emerald-500",
-      text: "Probando el generador de recetas con IA de Gemini. Tenía solo tomates maduros, pan duro y ajo en mi despensa... ¡y me ha sugerido un Salmorejo con un paso a paso perfecto! ¡Una maravilla contra el desperdicio! 🍅🍞 Refrescante para este verano.",
-      likes: 24,
-      likedByMe: true,
-      date: "Hace 4 horas",
-      photo: "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&q=80&w=600",
-      replies: [
-        { username: "MikiChef", text: "El salmorejo es sagrado, ¡un plato humilde y de primera!" }
-      ]
-    },
-    {
-      id: "p_5",
-      username: "CarmenValenciana",
-      avatarEmoji: "🥘",
-      avatarBg: "bg-amber-500",
-      text: "La receta de Paella de Marisco es asombrosa. Conseguí sacarle un socarrat crujiente en mi vitrocerámica gracias al truco del fuego máximo al final. Mis hijos no dejaron ni un grano de arroz. ¡Todo un acierto de recetas tradicionales! 🦞❤️",
-      likes: 42,
-      likedByMe: false,
-      date: "Hace 2 horas",
-      replies: [
-        { username: "Carlos_Madrid", text: "¡La paella valenciana es todo un arte, felicidades!" }
-      ]
-    },
-    {
-      id: "p_6",
-      username: "VeggieSanti",
-      avatarEmoji: "🥑",
-      avatarBg: "bg-lime-500",
-      text: "Súper fan de la ensalada templada de garbanzos y aguacate. No tenía ni idea de qué hacer con los botes de conserva que acumulaba en la despensa, ¡y este plato saludable se prepara literalmente en 10 minutos! Delicioso y con grasas buenas de verdad.",
-      likes: 19,
-      likedByMe: false,
-      date: "Hace 5 horas",
-      replies: [
-        { username: "LauraGastro", text: "Esa macedonia con limón y menta también viene genial para acompañar." }
-      ]
-    },
-    {
-      id: "p_7",
-      username: "AndaluzViajero",
-      avatarEmoji: "🍊",
-      avatarBg: "bg-red-500",
-      text: "Hecho hoy el flan casero al baño maría y me ha teletransportado a mi infancia en Sevilla. Textura sedosa y el caramelo de limón le da un toque gourmet espectacular. Un éxito rotundo en la cena familiar.",
-      likes: 28,
-      likedByMe: false,
-      date: "Hace 1 día",
-      replies: [
-        { username: "ChefCantabro", text: "¡El flan de huevo nunca falla!" }
-      ]
-    },
-    {
-      id: "p_8",
-      username: "MikiChef",
-      avatarEmoji: "👨‍🍳",
-      avatarBg: "bg-emerald-500",
-      text: "Como chef profesional, valoro mucho las porciones express. Hoy preparé el Sándwich Club de Pollo utilizando pan artesanal y mozzarella que me sobraba de las pizzas. Rápido, fresco y ecológico, ¡un auténtico golazo de 15 minutos!",
-      likes: 53,
-      likedByMe: false,
-      date: "Hace 2 días",
-      replies: [
-        { username: "LauraGastro", text: "¡Un plato de gourmet total en tiempo récord!" }
-      ]
-    }
-  ]);
+  >([]);
 
   // Entrada de nuevo post o comentario
   const [newPostText, setNewPostText] = useState("");
   const [activeReplyPostId, setActiveReplyPostId] = useState<string | null>(null);
   const [newReplyText, setNewReplyText] = useState("");
+
+  // --- EFECTOS DE AUTENTICACIÓN Y ENLACE DE DATOS DE FIREBASE ---
+  useEffect(() => {
+    // 1. Conexión de prueba rápida inicial
+    const testConnection = async () => {
+      try {
+        const { doc: testDoc, getDocFromServer } = await import("firebase/firestore");
+        await getDocFromServer(testDoc(db, "test", "connection"));
+      } catch (error: any) {
+        if (error instanceof Error && error.message.includes("the client is offline")) {
+          console.error("Please check your Firebase configuration.");
+        }
+      }
+    };
+    testConnection();
+
+    // 2. Escucha de cambios de estado en Firebase Auth
+    let unsubscribeHistory: (() => void) | null = null;
+    const unsubscribeAuth = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (unsubscribeHistory) {
+        unsubscribeHistory();
+        unsubscribeHistory = null;
+      }
+
+      if (firebaseUser) {
+        try {
+          const userRef = doc(db, "users", firebaseUser.uid);
+          const userSnap = await getDoc(userRef);
+
+          if (!userSnap.exists()) {
+            // El usuario inicia sesión por primera vez
+            const isGuest = firebaseUser.isAnonymous;
+            const name = isGuest ? "Invitado de la Cocina" : (firebaseUser.displayName || "Google Chef");
+            const defaultAvatar = isGuest ? CHEF_AVATARS[3] : CHEF_AVATARS[0];
+
+            const initialUserData = {
+              uid: firebaseUser.uid,
+              name,
+              avatarEmoji: defaultAvatar.emoji,
+              avatarBg: defaultAvatar.bg,
+              isGuest,
+              language,
+              pantry: ["patatas", "huevos", "cebolla", "aceite", "sal"],
+              customIngredients: [],
+              createdAt: new Date().toISOString()
+            };
+
+            await setDoc(userRef, initialUserData);
+            setUser({
+              name: initialUserData.name,
+              avatar: { id: "scanned", emoji: initialUserData.avatarEmoji, label: initialUserData.name, bg: initialUserData.avatarBg },
+              isGuest: initialUserData.isGuest
+            });
+            setPantry(initialUserData.pantry);
+            setCustomIngredients(initialUserData.customIngredients);
+          } else {
+            // El usuario ya tiene perfil, lo cargamos
+            const data = userSnap.data();
+            setUser({
+              name: data.name || "Chef",
+              avatar: { id: "scanned", emoji: data.avatarEmoji || "👨‍🍳", label: data.name || "Chef", bg: data.avatarBg || "bg-[#4FC3F7]" },
+              isGuest: data.isGuest || false
+            });
+            if (data.language) {
+              setLanguage(data.language as any);
+            }
+            setPantry(data.pantry || []);
+            setCustomIngredients(data.customIngredients || []);
+          }
+
+          // Escuchar el historial de cocina en tiempo real
+          const historyRef = collection(db, "users", firebaseUser.uid, "cookedHistory");
+          const qHistory = query(historyRef, orderBy("createdAt", "desc"));
+          unsubscribeHistory = onSnapshot(qHistory, (historySnap) => {
+            const historyList: any[] = [];
+            historySnap.forEach((docSnap) => {
+              historyList.push(docSnap.data());
+            });
+            
+            // Si tiene registros, los cargamos. Si está vacío en Firestore, dejamos lo que tiene o vacío
+            if (historyList.length > 0) {
+              setCookedHistory(historyList);
+            } else {
+              setCookedHistory([]);
+            }
+          }, (err) => {
+            handleFirestoreError(err, OperationType.LIST, `users/${firebaseUser.uid}/cookedHistory`);
+          });
+
+          setCurrentScreen("home");
+        } catch (err) {
+          console.error("Error setting up user profile from Firestore:", err);
+          // Fallback para no bloquear la aplicación si la conexión falla temporalmente
+          setUser({
+            name: firebaseUser.displayName || "Chef Sostenible",
+            avatar: CHEF_AVATARS[0],
+            isGuest: firebaseUser.isAnonymous
+          });
+          setCurrentScreen("home");
+        }
+      } else {
+        // Cerró sesión
+        setUser(null);
+        setPantry(["patatas", "huevos", "cebolla", "aceite", "sal"]);
+        setCustomIngredients([]);
+        setCookedHistory([
+          {
+            id: "h_1",
+            recipeId: "salmorejo_cordobes",
+            name: "Salmorejo Cordobés Genuino",
+            date: "Hace 2 días",
+            imageUrl: "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&q=80&w=600",
+            rating: 5,
+            favorite: true
+          },
+          {
+            id: "h_2",
+            recipeId: "macedonia_frutas",
+            name: "Macedonia Campestre Cremosa",
+            date: "Hace 5 días",
+            imageUrl: "https://images.unsplash.com/photo-1519996521430-02b798c1d881?auto=format&fit=crop&q=80&w=600",
+            rating: 4,
+            favorite: false
+          }
+        ]);
+      }
+    });
+
+    // 3. Cargar y sembrar posts de la comunidad
+    seedCommunityPostsIfEmpty().then(() => {
+      const postsRef = collection(db, "communityPosts");
+      const qPosts = query(postsRef, orderBy("createdAt", "desc"));
+      const unsubscribePosts = onSnapshot(qPosts, (postsSnap) => {
+        const postsList: any[] = [];
+        postsSnap.forEach((docSnap) => {
+          postsList.push({ id: docSnap.id, ...docSnap.data() });
+        });
+        setCommunityPosts(postsList);
+      }, (err) => {
+        handleFirestoreError(err, OperationType.LIST, "communityPosts");
+      });
+
+      return () => {
+        unsubscribePosts();
+      };
+    }).catch((err) => {
+      console.warn("Unable to load or seed community posts safely:", err);
+    });
+
+    return () => {
+      unsubscribeAuth();
+      if (unsubscribeHistory) unsubscribeHistory();
+    };
+  }, []);
+
+  // --- ESCUCHA REACTIVA PARA AUTO-GUARDADO DE DESPENSA Y PERSONALIZADOS ---
+  useEffect(() => {
+    if (!auth.currentUser) return;
+    const autoSavePantryAndIngredients = async () => {
+      try {
+        const userRef = doc(db, "users", auth.currentUser!.uid);
+        await updateDoc(userRef, {
+          pantry,
+          customIngredients
+        });
+      } catch (err: any) {
+        // En caso de que no se haya completado el create inicial se maneja de forma segura
+        console.warn("Auto-saving pantry state deferred:", err.message);
+      }
+    };
+    autoSavePantryAndIngredients();
+  }, [pantry, customIngredients]);
 
   // Integración Inteligente Gemini
   const [geminiLoading, setGeminiLoading] = useState(false);
@@ -932,23 +1094,31 @@ export default function EcoScanPage() {
     });
   }, [customIngredients, selectedPantryTab, searchPantryText]);
 
-  // --- Manejo del Login ---
-  const loginAsUser = (name: string, isDefault = true) => {
-    setUser({
-      name: name || "Mario",
-      avatar: isDefault ? CHEF_AVATARS[0] : CHEF_AVATARS[Math.floor(Math.random() * CHEF_AVATARS.length)],
-      isGuest: false
-    });
-    setCurrentScreen("home");
+  // --- Manejo del Login Real de Firebase ---
+  const handleGoogleLogin = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+      // El observador onAuthStateChanged se encargará de cargar los datos de Firestore o crearlo
+    } catch (err: any) {
+      console.error("Error al iniciar sesión con Google:", err);
+      alert("Error al iniciar sesión con Google. Por favor, asegúrate de habilitar los popups e inténtalo de nuevo.");
+    }
   };
 
-  const loginAsGuest = () => {
-    setUser({
-      name: "Invitado de la Cocina",
-      avatar: CHEF_AVATARS[3], // Avatar tomate
-      isGuest: true
-    });
-    setCurrentScreen("home");
+  const handleGuestLogin = async () => {
+    try {
+      await signInAnonymously(auth);
+      // El observador onAuthStateChanged se encargará de crear el perfil de invitado
+    } catch (err: any) {
+      console.error("Error al iniciar sesión como invitado:", err);
+      alert("Error al iniciar sesión como invitado. Se continuará en modo local.");
+      setUser({
+        name: "Invitado de la Cocina (Local)",
+        avatar: CHEF_AVATARS[3],
+        isGuest: true
+      });
+      setCurrentScreen("home");
+    }
   };
 
   // --- Añadir ingrediente personalizado ---
@@ -977,7 +1147,7 @@ export default function EcoScanPage() {
   };
 
   // --- Guardar receta finalizada en el historial ---
-  const handleFinishCooking = (recipe: Recipe) => {
+  const handleFinishCooking = async (recipe: Recipe) => {
     const nextHistoryId = `h_${Date.now()}`;
     const dateFormatted = "Hoy mismo";
     const newHistoryItem = {
@@ -987,70 +1157,147 @@ export default function EcoScanPage() {
       date: dateFormatted,
       imageUrl: recipe.imageUrl,
       rating: 5,
-      favorite: false
+      favorite: false,
+      createdAt: new Date().toISOString()
     };
 
-    setCookedHistory((prev) => [newHistoryItem, ...prev]);
+    if (auth.currentUser) {
+      try {
+        const historyRef = doc(db, "users", auth.currentUser.uid, "cookedHistory", nextHistoryId);
+        await setDoc(historyRef, newHistoryItem);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.CREATE, `users/${auth.currentUser.uid}/cookedHistory/${nextHistoryId}`);
+      }
+    } else {
+      setCookedHistory((prev) => [newHistoryItem, ...prev]);
+    }
+    
     alert(`🎉 ¡Enhorabuena! Has terminado de cocinar "${recipe.name}". El plato se ha guardado en tu historial.`);
     setCurrentScreen("history");
   };
 
-  // --- Me gustas y comentarios comunitarios ---
-  const handleLikePost = (postId: string) => {
-    setCommunityPosts((prev) =>
-      prev.map((post) => {
-        if (post.id === postId) {
-          const liked = !post.likedByMe;
-          return {
-            ...post,
-            likedByMe: liked,
-            likes: liked ? post.likes + 1 : post.likes - 1
-          };
-        }
-        return post;
-      })
-    );
+  // --- Me gustas y comentarios comunitarios reales en Firestore ---
+  const handleLikePost = async (postId: string) => {
+    if (!auth.currentUser) {
+      alert("Por favor, inicia sesión para poder dar Like a las publicaciones.");
+      return;
+    }
+
+    const post = communityPosts.find((p) => p.id === postId);
+    if (!post) return;
+
+    const uids = post.likedByUids || [];
+    const myUid = auth.currentUser.uid;
+    const isAlreadyLiked = uids.includes(myUid);
+
+    let newLikedByUids: string[] = [];
+    let newLikes = post.likes;
+
+    if (isAlreadyLiked) {
+      newLikedByUids = uids.filter(uid => uid !== myUid);
+      newLikes = Math.max(0, post.likes - 1);
+    } else {
+      newLikedByUids = [...uids, myUid];
+      newLikes = post.likes + 1;
+    }
+
+    try {
+      const postRef = doc(db, "communityPosts", postId);
+      await updateDoc(postRef, {
+        likedByUids: newLikedByUids,
+        likes: newLikes
+      });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `communityPosts/${postId}`);
+    }
   };
 
-  const handleSendPost = () => {
+  const handleSendPost = async () => {
     if (!newPostText.trim()) return;
+    if (!auth.currentUser) {
+      alert("Por favor, inicia sesión para publicar.");
+      return;
+    }
     const author = user ? user.name : "Anónimo";
     const avatar = user ? user.avatar : CHEF_AVATARS[0];
-    
-    const newPost = {
-      id: `p_${Date.now()}`,
+
+    if (newPostText.trim().length > 5000) {
+      alert("El texto excede el límite de 5000 caracteres.");
+      return;
+    }
+
+    const newPostId = `p_${Date.now()}`;
+    const newPostObj = {
+      id: newPostId,
+      uid: auth.currentUser.uid,
       username: author.replace(/\s+/g, ""),
       avatarEmoji: avatar.emoji,
       avatarBg: avatar.bg,
       text: newPostText.trim(),
       likes: 0,
-      likedByMe: false,
+      likedByUids: [],
       date: "Hace unos segundos",
-      replies: []
+      replies: [],
+      createdAt: new Date().toISOString()
     };
 
-    setCommunityPosts((prev) => [newPost, ...prev]);
-    setNewPostText("");
+    try {
+      const postRef = doc(db, "communityPosts", newPostId);
+      await setDoc(postRef, newPostObj);
+      setNewPostText("");
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, `communityPosts/${newPostId}`);
+    }
   };
 
-  const handleSendReply = (postId: string) => {
+  const handleSendReply = async (postId: string) => {
     if (!newReplyText.trim()) return;
+    if (!auth.currentUser) {
+      alert("Por favor, inicia sesión para comentar.");
+      return;
+    }
     const author = user ? user.name : "Anónimo";
 
-    setCommunityPosts((prev) =>
-      prev.map((post) => {
-        if (post.id === postId) {
-          return {
-            ...post,
-            replies: [...post.replies, { username: author.replace(/\s+/g, ""), text: newReplyText.trim() }]
-          };
-        }
-        return post;
-      })
-    );
+    const post = communityPosts.find((p) => p.id === postId);
+    if (!post) return;
 
-    setNewReplyText("");
-    setActiveReplyPostId(null);
+    const updatedReplies = [
+      ...(post.replies || []),
+      { username: author.replace(/\s+/g, ""), text: newReplyText.trim() }
+    ];
+
+    try {
+      const postRef = doc(db, "communityPosts", postId);
+      await updateDoc(postRef, {
+        replies: updatedReplies
+      });
+      setNewReplyText("");
+      setActiveReplyPostId(null);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `communityPosts/${postId}`);
+    }
+  };
+
+  // --- Actualizar perfil e idioma en Firestore ---
+  const updateProfileAndLanguageInFirestore = async (
+    newName: string,
+    newAvatarEmoji: string,
+    newAvatarBg: string,
+    newLang: string
+  ) => {
+    if (auth.currentUser) {
+      try {
+        const userRef = doc(db, "users", auth.currentUser.uid);
+        await updateDoc(userRef, {
+          name: newName,
+          avatarEmoji: newAvatarEmoji,
+          avatarBg: newAvatarBg,
+          language: newLang
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `users/${auth.currentUser.uid}`);
+      }
+    }
   };
 
   // --- Ajustes Rápidos en la Despensa para Pruebas (Panel izquierdo) ---
@@ -1207,12 +1454,12 @@ export default function EcoScanPage() {
 
                       {/* Avatar Selector para diversión extra */}
                       <div className="w-full bg-slate-900/40 border border-slate-800 p-4 rounded-2xl space-y-2">
-                        <span className="text-xs font-semibold text-gray-400 block mb-1">Elige tu apodo de chef:</span>
+                        <span className="text-xs font-semibold text-gray-400 block mb-1">Elige tu apodo de chef estrella:</span>
                         <div className="flex justify-center gap-2">
                           {CHEF_AVATARS.slice(0, 4).map((av) => (
                             <button
                               key={av.id}
-                              onClick={() => loginAsUser("Chef Mario", false)}
+                              onClick={handleGuestLogin}
                               className="w-10 h-10 rounded-full flex items-center justify-center text-xl bg-slate-800 border border-slate-700 hover:scale-110 active:scale-90 transition-all"
                               title={av.label}
                             >
@@ -1225,7 +1472,7 @@ export default function EcoScanPage() {
 
                     <div className="space-y-3">
                       <button
-                        onClick={() => loginAsUser("Mario Huguet")}
+                        onClick={handleGoogleLogin}
                         className="w-full py-3.5 px-6 rounded-2xl font-bold text-slate-800 bg-white hover:bg-slate-50 border border-slate-200 shadow-md flex items-center justify-center gap-3 transition-all"
                       >
                         {/* Mock Google Logo */}
@@ -1236,7 +1483,7 @@ export default function EcoScanPage() {
                       </button>
 
                       <button
-                        onClick={loginAsGuest}
+                        onClick={handleGuestLogin}
                         className="w-full py-3 px-6 rounded-x border border-slate-800 text-gray-300 hover:text-white hover:border-slate-500 text-xs font-semibold text-center transition-all bg-[#09101C]/50"
                       >
                         Continuar como invitado
@@ -2085,10 +2332,19 @@ export default function EcoScanPage() {
 
                             {/* Guardado en favoritos toggle */}
                             <button
-                              onClick={() => {
-                                setCookedHistory((prev) =>
-                                  prev.map((it) => (it.id === item.id ? { ...it, favorite: !it.favorite } : it))
-                                );
+                              onClick={async () => {
+                                if (auth.currentUser) {
+                                  try {
+                                    const historyRef = doc(db, "users", auth.currentUser.uid, "cookedHistory", item.id);
+                                    await updateDoc(historyRef, { favorite: !item.favorite });
+                                  } catch (err) {
+                                    handleFirestoreError(err, OperationType.UPDATE, `users/${auth.currentUser.uid}/cookedHistory/${item.id}`);
+                                  }
+                                } else {
+                                  setCookedHistory((prev) =>
+                                    prev.map((it) => (it.id === item.id ? { ...it, favorite: !it.favorite } : it))
+                                  );
+                                }
                               }}
                               className="p-1.5 rounded-lg border border-slate-900 hover:border-slate-800 text-slate-600 hover:text-amber-400 transition-colors"
                             >
@@ -2359,7 +2615,7 @@ export default function EcoScanPage() {
                               key={screen}
                               onClick={() => {
                                 if (!user && screen !== "splash" && screen !== "login") {
-                                  loginAsUser("Mario Huguet", true);
+                                  handleGuestLogin();
                                 }
                                 setCurrentScreen(screen);
                               }}
@@ -2626,7 +2882,12 @@ export default function EcoScanPage() {
                           {LANGUAGES.map((lang) => (
                             <button
                               key={lang.code}
-                              onClick={() => setLanguage(lang.code as any)}
+                              onClick={async () => {
+                                setLanguage(lang.code as any);
+                                if (user) {
+                                  await updateProfileAndLanguageInFirestore(user.name, user.avatar.emoji, user.avatar.bg, lang.code);
+                                }
+                              }}
                               className={`p-3 rounded-2xl border text-xs font-bold flex items-center gap-2.5 transition-all ${
                                 language === lang.code
                                   ? "bg-sky-500/10 border-sky-500 text-sky-400"
@@ -2647,10 +2908,13 @@ export default function EcoScanPage() {
                           <div className="flex gap-2.5 items-center">
                             <input
                               type="text"
-                              value={user?.name || "Mario"}
-                              onChange={(e) => {
+                              value={user?.name || ""}
+                              onChange={async (e) => {
                                 const newName = e.target.value;
                                 setUser(prev => prev ? { ...prev, name: newName } : { name: newName, avatar: CHEF_AVATARS[0], isGuest: false });
+                                if (user) {
+                                  await updateProfileAndLanguageInFirestore(newName, user.avatar.emoji, user.avatar.bg, language);
+                                }
                               }}
                               className="flex-1 bg-slate-950 text-xs border border-slate-905 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-sky-500/30"
                               placeholder="Tu nombre de chef..."
@@ -2663,7 +2927,12 @@ export default function EcoScanPage() {
                               {CHEF_AVATARS.map((av) => (
                                 <button
                                   key={av.id}
-                                  onClick={() => setUser(prev => prev ? { ...prev, avatar: av } : { name: "Mario", avatar: av, isGuest: false })}
+                                  onClick={async () => {
+                                    setUser(prev => prev ? { ...prev, avatar: av } : { name: "Mario", avatar: av, isGuest: false });
+                                    if (user) {
+                                      await updateProfileAndLanguageInFirestore(user.name, av.emoji, av.bg, language);
+                                    }
+                                  }}
                                   className={`p-2 rounded-xl flex items-center justify-center text-lg transition-all border ${
                                     user?.avatar.id === av.id
                                       ? "bg-sky-500/20 border-sky-500 scale-105"
@@ -2677,6 +2946,25 @@ export default function EcoScanPage() {
                             </div>
                           </div>
                         </div>
+                      </div>
+
+                      {/* Power Cerrar Sesión Button */}
+                      <div className="pt-2">
+                        <button
+                          onClick={async () => {
+                            try {
+                              await signOut(auth);
+                              setShowSettingsModal(false);
+                              setCurrentScreen("login");
+                            } catch (err) {
+                              console.error("Error logging out from Firebase:", err);
+                            }
+                          }}
+                          className="w-full py-3.5 px-4 rounded-2xl font-bold bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs text-center border border-red-500/20 transition-all flex items-center justify-center gap-2.5"
+                        >
+                          <Power className="w-4.5 h-4.5" />
+                          Cerrar Sesión (Sign Out)
+                        </button>
                       </div>
 
                     </div>

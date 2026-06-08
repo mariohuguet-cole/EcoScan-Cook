@@ -1,0 +1,131 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reusable, hardened security helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Entity validation functions
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'name', 'avatarEmoji', 'avatarBg', 'isGuest', 'language'])
+        && data.keys().size() >= 6
+        && data.uid is string && data.uid.size() <= 128
+        && data.name is string && data.name.size() <= 100
+        && data.avatarEmoji is string && data.avatarEmoji.size() <= 10
+        && data.avatarBg is string && data.avatarBg.size() <= 50
+        && data.isGuest is bool
+        && data.language is string && data.language.size() <= 10
+        && (!data.keys().contains('pantry') || data.pantry is list)
+        && (!data.keys().contains('customIngredients') || data.customIngredients is list)
+        && (!data.keys().contains('createdAt') || data.createdAt is string || data.createdAt is timestamp);
+    }
+
+    function isValidCookedHistory(data) {
+      return data.keys().hasAll(['id', 'recipeId', 'name', 'date', 'imageUrl', 'rating', 'favorite', 'createdAt'])
+        && data.keys().size() == 8
+        && data.id is string && data.id.size() <= 128
+        && data.recipeId is string && data.recipeId.size() <= 128
+        && data.name is string && data.name.size() <= 100
+        && data.date is string && data.date.size() <= 50
+        && data.imageUrl is string && data.imageUrl.size() <= 1000
+        && data.rating is int && data.rating >= 1 && data.rating <= 5
+        && data.favorite is bool
+        && (data.createdAt is string || data.createdAt is timestamp);
+    }
+
+    function isValidCommunityPost(data) {
+      return data.keys().hasAll(['id', 'uid', 'username', 'avatarEmoji', 'avatarBg', 'text', 'likes', 'likedByUids', 'createdAt'])
+        && data.keys().size() >= 9
+        && data.keys().size() <= 11
+        && data.id is string && data.id.size() <= 128
+        && data.uid is string && data.uid.size() <= 128
+        && data.username is string && data.username.size() <= 100
+        && data.avatarEmoji is string && data.avatarEmoji.size() <= 10
+        && data.avatarBg is string && data.avatarBg.size() <= 50
+        && data.text is string && data.text.size() <= 5000
+        && data.likes is int
+        && data.likedByUids is list
+        && (data.createdAt is string || data.createdAt is timestamp)
+        && (!data.keys().contains('photo') || data.photo is string)
+        && (!data.keys().contains('replies') || data.replies is list);
+    }
+
+    // Match Rules for Collections
+
+    // 1. Users profiles and settings
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(incoming()) && incoming().uid == userId;
+      allow update: if isOwner(userId) && isValidUser(incoming()) && incoming().uid == userId
+        && (!existing().keys().contains('createdAt') || !incoming().keys().contains('createdAt') || incoming().createdAt == existing().createdAt);
+      allow delete: if false;
+    }
+
+    // 2. User specific Cooked history logs
+    match /users/{userId}/cookedHistory/{historyId} {
+      allow get: if isOwner(userId) && isValidId(historyId);
+      allow list: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidId(historyId) && isValidCookedHistory(incoming()) && incoming().id == historyId;
+      allow update: if isOwner(userId) && isValidId(historyId) && isValidCookedHistory(incoming()) && incoming().id == historyId
+        && (!existing().keys().contains('createdAt') || !incoming().keys().contains('createdAt') || incoming().createdAt == existing().createdAt);
+      allow delete: if isOwner(userId) && isValidId(historyId);
+    }
+
+    // 3. Global community posts
+    match /communityPosts/{postId} {
+      allow get: if isSignedIn() && isValidId(postId);
+      allow list: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(postId) && isValidCommunityPost(incoming())
+        && incoming().id == postId
+        && incoming().uid == request.auth.uid;
+      
+      allow update: if isSignedIn() && isValidId(postId) && isValidCommunityPost(incoming())
+        && incoming().id == postId
+        && (!existing().keys().contains('createdAt') || !incoming().keys().contains('createdAt') || incoming().createdAt == existing().createdAt)
+        && (
+          // Case 1: Editing body text (only the author themselves)
+          (incoming().uid == request.auth.uid && incoming().likes == existing().likes && incoming().likedByUids == existing().likedByUids
+           && incoming().diff(existing()).affectedKeys().hasOnly(['text', 'photo'])) ||
+          
+          // Case 2: Toggling likes (updates size of likedByUids and changes likes count precisely to avoid cheat-flooding)
+          (incoming().uid == existing().uid && incoming().text == existing().text && incoming().photo == existing().photo
+           && (
+             // Liked (adds themselves)
+             (incoming().likedByUids.hasAll(existing().likedByUids) && incoming().likedByUids.size() == existing().likedByUids.size() + 1 && incoming().likedByUids.contains(request.auth.uid) && incoming().likes == existing().likes + 1) ||
+             // Unliked (removes themselves)
+             (existing().likedByUids.hasAll(incoming().likedByUids) && incoming().likedByUids.size() == existing().likedByUids.size() - 1 && !incoming().likedByUids.contains(request.auth.uid) && incoming().likes == existing().likes - 1)
+           )
+           && incoming().diff(existing()).affectedKeys().hasOnly(['likes', 'likedByUids'])) ||
+
+          // Case 3: Adding a comment / reply
+          (incoming().uid == existing().uid && incoming().text == existing().text && incoming().photo == existing().photo && incoming().likes == existing().likes && incoming().likedByUids == existing().likedByUids
+           && incoming().diff(existing()).affectedKeys().hasOnly(['replies']))
+        );
+        
+      allow delete: if isSignedIn() && isValidId(postId) && existing().uid == request.auth.uid;
+    }
+  }
+}

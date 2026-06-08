@@ -1,0 +1,71 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User preferences, selected avatar and metadata",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "The unique user ID" },
+        "name": { "type": "string", "description": "Display name of the user" },
+        "avatarEmoji": { "type": "string", "description": "Representing emoji for avatar" },
+        "avatarBg": { "type": "string", "description": "Tailwind bg color for avatar" },
+        "isGuest": { "type": "boolean", "description": "True if user is logging in as guest" },
+        "language": { "type": "string", "description": "The preferred language" },
+        "pantry": { "type": "array", "description": "Checked ingredients in user's pantry" },
+        "customIngredients": { "type": "array", "description": "User customized ingredients" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "User creation timestamp" }
+      },
+      "required": ["uid", "name", "avatarEmoji", "avatarBg", "isGuest", "language"]
+    },
+    "CookedHistory": {
+      "title": "Cooked History Item",
+      "description": "Information about a recipe cooked by the user",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Historic item unique ID" },
+        "recipeId": { "type": "string", "description": "ID of reference recipe" },
+        "name": { "type": "string", "description": "Name of recipe in active language" },
+        "date": { "type": "string", "description": "Display date of creation" },
+        "imageUrl": { "type": "string", "description": "Visual image of the food" },
+        "rating": { "type": "integer", "description": "User rating, 1 to 5 stars" },
+        "favorite": { "type": "boolean", "description": "Is starred or marked as favorite" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Timestamp of cooking finish" }
+      },
+      "required": ["id", "recipeId", "name", "date", "imageUrl", "rating", "favorite", "createdAt"]
+    },
+    "CommunityPost": {
+      "title": "Community Post",
+      "description": "A shared post in the social community feed",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique post ID" },
+        "uid": { "type": "string", "description": "User id of the author" },
+        "username": { "type": "string", "description": "Display name of author" },
+        "avatarEmoji": { "type": "string", "description": "Representing emoji for author" },
+        "avatarBg": { "type": "string", "description": "Tailwind bg color for author avatar" },
+        "text": { "type": "string", "description": "Main body of the text" },
+        "likes": { "type": "integer", "description": "Number of likes" },
+        "likedByUids": { "type": "array", "description": "UIDs of users who liked this post" },
+        "date": { "type": "string", "description": "Formatted date or timestamp" },
+        "photo": { "type": "string", "description": "Optional attached picture" },
+        "replies": { "type": "array", "description": "Comments attached to this post" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp" }
+      },
+      "required": ["id", "uid", "username", "avatarEmoji", "avatarBg", "text", "likes", "likedByUids", "createdAt"]
+    }
+  },
+  "firestore": {
+    "users/{userId}": {
+      "schema": "User",
+      "description": "User profile, preferred language and pantry states"
+    },
+    "users/{userId}/cookedHistory/{historyId}": {
+      "schema": "CookedHistory",
+      "description": "User cooked history logs"
+    },
+    "communityPosts/{postId}": {
+      "schema": "CommunityPost",
+      "description": "Global community text posts, replies and likes"
+    }
+  }
+}
